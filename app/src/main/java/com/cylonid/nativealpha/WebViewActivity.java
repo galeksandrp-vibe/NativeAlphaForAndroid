@@ -21,6 +21,7 @@ import android.text.SpannableString;
 import android.text.style.ForegroundColorSpan;
 import android.text.style.StyleSpan;
 import android.util.Log;
+import android.view.KeyEvent;
 import android.view.LayoutInflater;
 import android.view.MenuItem;
 import android.view.MotionEvent;
@@ -97,6 +98,13 @@ public class WebViewActivity extends AppCompatActivity implements EasyPermission
     private static final int NONE = 0;
     private static final int SWIPE = 1;
     private static final int TRESHOLD = 100;
+
+    //Constants for Ctrl +/-/= keyboard zoom (browser-like)
+    private static final int ZOOM_STEP_PERCENT = 10;
+    private static final int ZOOM_MIN_PERCENT = 50;
+    private static final int ZOOM_MAX_PERCENT = 300;
+    private static final int ZOOM_DEFAULT_PERCENT = 100;
+
     int webappID = -1;
     private WebView wv;
     private ProgressBar progressBar;
@@ -244,6 +252,7 @@ public class WebViewActivity extends AppCompatActivity implements EasyPermission
             wv.getSettings().setSupportZoom(true);
             wv.getSettings().setBuiltInZoomControls(true);
         }
+        wv.getSettings().setTextZoom(getSavedTextZoom());
 
         CUSTOM_HEADERS = initCustomHeaders(webapp.isSendSavedataRequest());
         loadURL(wv, url);
@@ -511,6 +520,82 @@ public class WebViewActivity extends AppCompatActivity implements EasyPermission
     public void onConfigurationChanged(@NonNull Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
         this.setDarkModeIfNeeded();
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        if (wv != null && event.getAction() == KeyEvent.ACTION_DOWN) {
+            int keyCode = event.getKeyCode();
+            // Dedicated zoom keys work with or without Ctrl (e.g. some keyboards / Chromebooks)
+            if (keyCode == KeyEvent.KEYCODE_ZOOM_IN) {
+                adjustTextZoomBy(ZOOM_STEP_PERCENT);
+                return true;
+            }
+            if (keyCode == KeyEvent.KEYCODE_ZOOM_OUT) {
+                adjustTextZoomBy(-ZOOM_STEP_PERCENT);
+                return true;
+            }
+            if (event.isCtrlPressed()) {
+                // Ctrl + '+' / '=' (PLUS is Shift + EQUALS, so EQUALS covers both) -> zoom in
+                if (keyCode == KeyEvent.KEYCODE_EQUALS || keyCode == KeyEvent.KEYCODE_NUMPAD_ADD) {
+                    adjustTextZoomBy(ZOOM_STEP_PERCENT);
+                    return true;
+                }
+                // Ctrl + '-' -> zoom out
+                if (keyCode == KeyEvent.KEYCODE_MINUS || keyCode == KeyEvent.KEYCODE_NUMPAD_SUBTRACT) {
+                    adjustTextZoomBy(-ZOOM_STEP_PERCENT);
+                    return true;
+                }
+                // Ctrl + '0' -> reset zoom, like desktop browsers
+                if (keyCode == KeyEvent.KEYCODE_0 || keyCode == KeyEvent.KEYCODE_NUMPAD_0) {
+                    resetTextZoom();
+                    return true;
+                }
+            }
+        }
+        return super.dispatchKeyEvent(event);
+    }
+
+    private int getSavedTextZoom() {
+        int zoom = ZOOM_DEFAULT_PERCENT;
+        try {
+            if (webapp != null) {
+                zoom = webapp.getTextZoom();
+            }
+        } catch (Exception ignored) {
+        }
+        if (zoom < ZOOM_MIN_PERCENT || zoom > ZOOM_MAX_PERCENT) {
+            zoom = ZOOM_DEFAULT_PERCENT;
+        }
+        return zoom;
+    }
+
+    private void adjustTextZoomBy(int deltaPercent) {
+        if (wv == null) return;
+        int currentZoom = wv.getSettings().getTextZoom();
+        if (currentZoom <= 0) currentZoom = getSavedTextZoom();
+        int newZoom = currentZoom + deltaPercent;
+        if (newZoom < ZOOM_MIN_PERCENT) newZoom = ZOOM_MIN_PERCENT;
+        if (newZoom > ZOOM_MAX_PERCENT) newZoom = ZOOM_MAX_PERCENT;
+        setTextZoom(newZoom);
+    }
+
+    private void resetTextZoom() {
+        setTextZoom(ZOOM_DEFAULT_PERCENT);
+    }
+
+    private void setTextZoom(int newZoom) {
+        if (wv == null) return;
+        wv.getSettings().setTextZoom(newZoom);
+        try {
+            if (webapp != null) {
+                webapp.setTextZoom(newZoom);
+                DataManager.getInstance().saveWebAppData();
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        NotificationUtils.showInfoSnackbar(this, "Zoom: " + newZoom + "%", Snackbar.LENGTH_SHORT);
     }
 
     @Override

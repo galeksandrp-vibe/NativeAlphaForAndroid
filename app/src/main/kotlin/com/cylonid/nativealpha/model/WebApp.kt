@@ -52,6 +52,7 @@ data class WebApp(var baseUrl: String, val ID: Int) {
     var isCameraPermission = false
     var isMicrophonePermission = false
     var isEnableZooming = false
+    var textZoom: Int = 100
     var isBiometricProtection = false
     var isAllowMediaPlaybackInBackground = false
     var order = 0
@@ -114,6 +115,7 @@ data class WebApp(var baseUrl: String, val ID: Int) {
         isCameraPermission = other.isCameraPermission
         isMicrophonePermission = other.isMicrophonePermission
         isEnableZooming = other.isEnableZooming
+        textZoom = other.textZoom
         isBiometricProtection = other.isBiometricProtection
         isAllowMediaPlaybackInBackground = other.isAllowMediaPlaybackInBackground
         order = other.order

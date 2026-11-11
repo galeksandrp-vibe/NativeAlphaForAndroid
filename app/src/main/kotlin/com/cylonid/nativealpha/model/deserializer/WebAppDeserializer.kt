@@ -19,6 +19,7 @@ class WebAppDeserializer : JsonDeserializer<WebApp> {
         val obj = json.asJsonObject
         val webapp = Gson().fromJson(obj, WebApp::class.java)
         patchDataVersion1500(webapp, obj)
+        patchTextZoomDefaults(webapp, obj)
         return webapp
     }
 
@@ -52,5 +53,20 @@ class WebAppDeserializer : JsonDeserializer<WebApp> {
             webapp.adBlockSettings = Const.getDefaultAdBlockConfig()
         }
         webapp.adBlockSettings = webapp.adBlockSettings.take(8).toMutableList()
+    }
+
+    /**
+     * textZoom was added after v1.5.2. Old backups have no key (Gson leaves 0)
+     * or potentially out-of-range values. Clamp to a sane browser-like range.
+     */
+    private fun patchTextZoomDefaults(webapp: WebApp, obj: JsonObject) {
+        val hasKey = obj.has("textZoom")
+        var zoom = webapp.textZoom
+        if (!hasKey || zoom == 0) {
+            zoom = 100
+        }
+        if (zoom < 50) zoom = 50
+        if (zoom > 300) zoom = 300
+        webapp.textZoom = zoom
     }
 }
