@@ -7,10 +7,12 @@ jobs:
   build:
 
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
     - uses: actions/checkout@v4
-    - name: set up JDK 11
+    - name: set up JDK 17
       uses: actions/setup-java@v4
       with:
         java-version: '17'
@@ -20,10 +22,31 @@ jobs:
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
     - name: Build with Gradle
-      run: ./gradlew build
+      # NOTE: `build` (all variants) breaks the manifest/sandbox codegen hack in
+      # app/build.gradle (it mutates src/main per variant), so build one variant.
+      run: ./gradlew assembleStandardRelease
+
+    - name: Resolve build-tools version
+      run: echo "BT_VERSION=$(ls "$ANDROID_HOME/build-tools" | grep -E '^35\.' | sort -V | tail -1)" >> "$GITHUB_ENV"
+
+    - name: Sign APKs
+      uses: r0adkll/sign-android-release@v1
+      with:
+        releaseDirectory: app/build/outputs/apk/standard/release
+        signingKeyBase64: ${{ secrets.SIGNING_KEY }}
+        alias: ${{ secrets.ALIAS }}
+        keyStorePassword: ${{ secrets.KEY_STORE_PASSWORD }}
+        keyPassword: ${{ secrets.KEY_PASSWORD }}
+      env:
+        BUILD_TOOLS_VERSION: ${{ env.BT_VERSION }}
 
     - name: Upload APK
       uses: actions/upload-artifact@v4
       with:
         name: dev
-        path: app/build/outputs/apk/release/*.apk
+        path: app/build/outputs/apk/standard/release/*-signed.apk
+
+    - uses: softprops/action-gh-release@v2
+      with:
+        tag_name: vlatest
+        files: app/build/outputs/apk/standard/release/*-signed.apk
