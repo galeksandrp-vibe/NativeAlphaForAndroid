@@ -20,7 +20,9 @@ import android.os.Handler;
 import android.text.SpannableString;
 import android.text.style.ForegroundColorSpan;
 import android.text.style.StyleSpan;
+import android.util.DisplayMetrics;
 import android.util.Log;
+import android.view.KeyEvent;
 import android.view.LayoutInflater;
 import android.view.MenuItem;
 import android.view.MotionEvent;
@@ -97,6 +99,15 @@ public class WebViewActivity extends AppCompatActivity implements EasyPermission
     private static final int NONE = 0;
     private static final int SWIPE = 1;
     private static final int TRESHOLD = 100;
+
+    //Constants for Ctrl +/-/= keyboard zoom (browser-like full-page zoom)
+    private static final int[] ZOOM_LEVELS_PERCENT = {25, 33, 50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200, 250, 300, 400, 500};
+    private static final int ZOOM_DEFAULT_PERCENT = 100;
+    private int currentZoomPercent = ZOOM_DEFAULT_PERCENT;
+    // One reload per user zoom action is allowed, to guarantee the document is
+    // laid out with the new initial scale (see verifyLayoutWidth).
+    private boolean zoomReloadPending = false;
+
     int webappID = -1;
     private WebView wv;
     private ProgressBar progressBar;
@@ -244,6 +255,8 @@ public class WebViewActivity extends AppCompatActivity implements EasyPermission
             wv.getSettings().setSupportZoom(true);
             wv.getSettings().setBuiltInZoomControls(true);
         }
+        currentZoomPercent = getSavedPageZoom();
+        applyInitialScale(wv);
 
         CUSTOM_HEADERS = initCustomHeaders(webapp.isSendSavedataRequest());
         loadURL(wv, url);
@@ -511,6 +524,191 @@ public class WebViewActivity extends AppCompatActivity implements EasyPermission
     public void onConfigurationChanged(@NonNull Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
         this.setDarkModeIfNeeded();
+        if (currentZoomPercent != ZOOM_DEFAULT_PERCENT && wv != null) {
+            // Screen geometry changed: the layout width follows the screen, so the
+            // initial scale is re-applied and the width verified again.
+            stripViewportScaleLimits(wv, true);
+        }
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        if (wv != null && event.getAction() == KeyEvent.ACTION_DOWN) {
+            int keyCode = event.getKeyCode();
+            // Dedicated zoom keys work with or without Ctrl (e.g. some keyboards / Chromebooks)
+            if (keyCode == KeyEvent.KEYCODE_ZOOM_IN) {
+                adjustPageZoom(true);
+                return true;
+            }
+            if (keyCode == KeyEvent.KEYCODE_ZOOM_OUT) {
+                adjustPageZoom(false);
+                return true;
+            }
+            if (event.isCtrlPressed()) {
+                // Ctrl + '+' / '=' (PLUS is Shift + EQUALS, so EQUALS covers both) -> zoom in
+                if (keyCode == KeyEvent.KEYCODE_EQUALS || keyCode == KeyEvent.KEYCODE_NUMPAD_ADD) {
+                    adjustPageZoom(true);
+                    return true;
+                }
+                // Ctrl + '-' -> zoom out
+                if (keyCode == KeyEvent.KEYCODE_MINUS || keyCode == KeyEvent.KEYCODE_NUMPAD_SUBTRACT) {
+                    adjustPageZoom(false);
+                    return true;
+                }
+                // Ctrl + '0' -> reset zoom, like desktop browsers
+                if (keyCode == KeyEvent.KEYCODE_0 || keyCode == KeyEvent.KEYCODE_NUMPAD_0) {
+                    resetPageZoom();
+                    return true;
+                }
+            }
+        }
+        return super.dispatchKeyEvent(event);
+    }
+
+    private int getSavedPageZoom() {
+        int zoom = ZOOM_DEFAULT_PERCENT;
+        try {
+            if (webapp != null) {
+                zoom = webapp.getPageZoom();
+            }
+        } catch (Exception ignored) {
+        }
+        if (zoom < ZOOM_LEVELS_PERCENT[0] || zoom > ZOOM_LEVELS_PERCENT[ZOOM_LEVELS_PERCENT.length - 1]) {
+            zoom = ZOOM_DEFAULT_PERCENT;
+        }
+        return zoom;
+    }
+
+    private int nearestZoomLevelIndex(float percent) {
+        int best = 0;
+        float bestDiff = Math.abs(ZOOM_LEVELS_PERCENT[0] - percent);
+        for (int i = 1; i < ZOOM_LEVELS_PERCENT.length; i++) {
+            float diff = Math.abs(ZOOM_LEVELS_PERCENT[i] - percent);
+            if (diff < bestDiff) {
+                bestDiff = diff;
+                best = i;
+            }
+        }
+        return best;
+    }
+
+    private void adjustPageZoom(boolean zoomIn) {
+        if (wv == null) return;
+        int index = nearestZoomLevelIndex(currentZoomPercent);
+        if (zoomIn && index < ZOOM_LEVELS_PERCENT.length - 1) index++;
+        if (!zoomIn && index > 0) index--;
+        applyPageZoom(ZOOM_LEVELS_PERCENT[index]);
+    }
+
+    private void resetPageZoom() {
+        applyPageZoom(ZOOM_DEFAULT_PERCENT);
+    }
+
+    private void applyPageZoom(int newPercent) {
+        if (wv == null) return;
+        if (webapp != null && !webapp.isAllowJs()) {
+            NotificationUtils.showInfoSnackbar(this, "Zoom needs JavaScript enabled for this Web App", Snackbar.LENGTH_SHORT);
+            return;
+        }
+        currentZoomPercent = newPercent;
+        zoomReloadPending = false;
+        try {
+            if (webapp != null) {
+                webapp.setPageZoom(newPercent);
+                // replaceWebApp (not bare saveWebAppData): getWebApp() rebuilds the
+                // websitelist from disk on every call, so the field object may be
+                // detached - put it back into the list by ID before saving.
+                DataManager.getInstance().replaceWebApp(webapp);
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        stripViewportScaleLimits(wv, newPercent != ZOOM_DEFAULT_PERCENT);
+        NotificationUtils.showInfoSnackbar(this, "Zoom: " + newPercent + "%", Snackbar.LENGTH_SHORT);
+    }
+
+    /**
+     * Zoom is applied natively, by changing the page scale; no layout rewriting
+     * and no zoomBy. WebView.setInitialScale() goes through AwSettings, which
+     * divides by the display density, into Blink's
+     * PageScaleConstraintsSet::AdjustForAndroidWebViewQuirks: for device-width /
+     * automatic viewports that initial scale also divides the LAYOUT width, so
+     * the document is laid out narrower (zoom in) or wider (zoom out) and the
+     * page reflows exactly like a desktop browser zoom, then scales to fill the
+     * screen.
+     */
+    private void applyInitialScale(WebView view) {
+        if (view == null) return;
+        if (currentZoomPercent == ZOOM_DEFAULT_PERCENT) {
+            view.setInitialScale(0);
+            return;
+        }
+        float density = getResources().getDisplayMetrics().density;
+        if (density <= 0f) density = 1f;
+        // setInitialScale() is divided by the density inside WebView, so the
+        // requested zoom is multiplied here to make the resulting page scale
+        // exactly the requested percentage.
+        view.setInitialScale(Math.round(currentZoomPercent * density));
+    }
+
+    /**
+     * Author clamps (maximum-scale / user-scalable=no) would cap the initial
+     * scale and silently cancel zoom-in, so they are removed while zoom is
+     * active and restored afterwards. Width directives are left untouched: the
+     * initial scale is what drives the reflow.
+     */
+    private void stripViewportScaleLimits(final WebView view, final boolean strip) {
+        if (view == null) return;
+        String js = "(function(strip){"
+                + "var m=document.querySelector('meta[name=\"viewport\"]');"
+                + "if(!m)return 'none';"
+                + "if(strip){"
+                + "if(!m.hasAttribute('data-na-orig')){m.setAttribute('data-na-orig',m.getAttribute('content')||'');}"
+                + "var parts=(m.getAttribute('content')||'').split(',').map(function(s){return s.trim();})"
+                + ".filter(function(s){return s&&!/^(initial|minimum|maximum)-scale\\s*=/i.test(s)&&!/^user-scalable\\s*=/i.test(s);});"
+                + "m.setAttribute('content',parts.join(', '));"
+                + "}else if(m.hasAttribute('data-na-orig')){"
+                + "m.setAttribute('content',m.getAttribute('data-na-orig'));"
+                + "m.removeAttribute('data-na-orig');"
+                + "}return 'ok';})(" + strip + ")";
+        view.evaluateJavascript(js, value -> {
+            if (view != wv) return;
+            applyInitialScale(view);
+            verifyLayoutWidth(view);
+        });
+    }
+
+    private int expectedLayoutWidthCss() {
+        if (currentZoomPercent == ZOOM_DEFAULT_PERCENT) return 0;
+        DisplayMetrics dm = getResources().getDisplayMetrics();
+        if (dm.density <= 0f) return 0;
+        float cssWidth = dm.widthPixels / dm.density;
+        return Math.max(50, Math.round(cssWidth * 100f / currentZoomPercent));
+    }
+
+    /**
+     * Whether the native path took effect is checked against the real layout
+     * width, not a cached scale. If the document was still laid out for the old
+     * scale (no relayout happened), one reload makes it deterministic: the
+     * initial scale is already set, so the reloaded document is laid out for the
+     * new zoom from its first line.
+     */
+    private void verifyLayoutWidth(final WebView view) {
+        final int expected = expectedLayoutWidthCss();
+        if (view == null || expected <= 0) return;
+        view.postDelayed(() -> {
+            if (view != wv) return;
+            view.evaluateJavascript("document.documentElement.clientWidth", value -> {
+                try {
+                    int actual = Math.round(Float.parseFloat(value.replace("\"", "").trim()));
+                    if (actual > 0 && Math.abs(actual - expected) * 100 / expected > 15 && !zoomReloadPending) {
+                        zoomReloadPending = true;
+                        view.reload();
+                    }
+                } catch (Exception ignored) {
+                }
+            });
+        }, 350);
     }
 
     @Override
@@ -899,6 +1097,10 @@ public class WebViewActivity extends AppCompatActivity implements EasyPermission
             }
             wv.evaluateJavascript("document.addEventListener(\"visibilitychange\",function (event) {event.stopImmediatePropagation();},true);", null);
             super.onPageFinished(view, url);
+            // Every new document carries its own viewport meta, so the clamps are
+            // stripped (and the initial scale re-applied) per page. The layout
+            // width check then decides whether a reload is needed.
+            stripViewportScaleLimits(view, currentZoomPercent != ZOOM_DEFAULT_PERCENT);
         }
 
         @Override

@@ -52,6 +52,7 @@ data class WebApp(var baseUrl: String, val ID: Int) {
     var isCameraPermission = false
     var isMicrophonePermission = false
     var isEnableZooming = false
+    var pageZoom: Int = 100
     var isBiometricProtection = false
     var isAllowMediaPlaybackInBackground = false
     var order = 0
@@ -77,6 +78,7 @@ data class WebApp(var baseUrl: String, val ID: Int) {
         containerId = other.containerId
         isUseContainer = other.isUseContainer
         copySettings(other)
+        pageZoom = other.pageZoom
     }
 
 
